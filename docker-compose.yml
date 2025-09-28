@@ -1,0 +1,288 @@
+version: "3.9"
+
+services:
+  # -------------------------
+  # Zookeeper
+  # -------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - devnet
+
+  # -------------------------
+  # Kafka Broker
+  # -------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+
+      # KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - devnet
+
+  # -------------------------
+  # Kafka UI
+  # -------------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - devnet
+
+  # -------------------------
+  # PostgreSQL
+  # -------------------------
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kafka_sink
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - devnet
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter
+    container_name: postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres@postgres:5432/kafka_sink?sslmode=disable"
+    ports:
+      - "9187:9187"
+    networks:
+      - devnet
+    depends_on:
+      - postgres
+
+  # -------------------------
+  # Kafka Connect
+  # -------------------------
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:7.6.0
+    container_name: kafka-connect
+    depends_on:
+      - kafka
+      - postgres
+      - minio
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: kafka-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: connect-status
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_PLUGIN_PATH: /usr/share/java,/etc/kafka-connect/jars
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      AWS_REGION: us-east-1
+    volumes:
+      - ./jars:/etc/kafka-connect/jars
+    networks:
+      - devnet
+
+  # -------------------------
+  # MinIO (S3-compatible storage)
+  # -------------------------
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Console
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - devnet
+
+  # -------------------------
+  # Airflow
+  # -------------------------
+  airflow:
+    image: apache/airflow:2.8.1
+    user: "1000:1000"
+    container_name: airflow
+    depends_on:
+      - postgres
+      - kafka
+      - minio
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airline
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: "8l1IhF38HeK19juu4H6oTDObD1QVjHCw9slddE_1tAo="
+    ports:
+      - "8089:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+        airflow scheduler & 
+        airflow webserver
+      "
+    networks:
+      - devnet
+
+  # -------------------------
+  # Grafana
+  # -------------------------
+  grafana:
+    image: grafana/grafana:12.2.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - devnet
+    depends_on:
+      - prometheus
+
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - devnet
+  # -------------------------
+  # Spark Master
+  # -------------------------
+  spark-master:
+    image: bitnami/spark:3.5.1
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_EVENTLOG_ENABLED=true
+      - SPARK_EVENTLOG_DIR=/tmp/spark-events
+      - SPARK_HISTORY_FS_LOGDIRECTORY=/tmp/spark-events
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - SPARK_MASTER_JMX_PORT=7073
+      - SPARK_JMX_EXPORTER_PORT=8090
+      - SPARK_JMX_EXPORTER_CONFIG=/opt/spark/jmx_prometheus_config.yaml
+    ports:
+      - "7077:7077" # Spark RPC
+      - "8080:8080" # Spark Master UI
+      - "7073:7073" # JMX port
+      - "8090:8090" # Prometheus metrics port
+    volumes:
+      - ./jars:/opt/spark/jars
+      - ./spark-events:/tmp/spark-events
+      - ./spark-jmx:/opt/spark
+    networks:
+      - devnet
+
+  # -------------------------
+  # Spark Worker
+  # -------------------------
+  spark-worker:
+    image: bitnami/spark:3.5.1
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_WEBUI_PORT=8081
+      - SPARK_WORKER_JMX_PORT=7074
+      - SPARK_JMX_EXPORTER_PORT=8091
+      - SPARK_JMX_EXPORTER_CONFIG=/opt/spark/jmx_prometheus_config.yaml
+    volumes:
+      - ./spark-events:/tmp/spark-events
+      - ./spark-jmx:/opt/spark
+      - ./jars:/opt/spark/jars
+    networks:
+      - devnet
+    deploy:
+      replicas: 2
+  # Jupyter Notebook
+  jupyter:
+    image: jupyter_impr-jupyter:latest
+    container_name: jupyter-airline
+    ports:
+      - "8890:8888" # Jupyter Lab
+      - "4040:4040" # Spark Application UI (dedicated port)
+      - "4041:4041" # Additional Spark Application UI
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./datasets:/data
+      - ./jars:/opt/spark/jars
+      - ./spark-events:/tmp/spark-events
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: "" # Disable token for easier VS Code connection
+      JUPYTER_PASSWORD: "" # Disable password
+      SPARK_MASTER: spark://spark-master:7077
+      PYSPARK_PYTHON: python3
+      PYSPARK_DRIVER_PYTHON: jupyter
+      PYSPARK_DRIVER_PYTHON_OPTS: "lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''"
+
+      SPARK_CLASSPATH: "/opt/spark/jars/*"
+      PYSPARK_SUBMIT_ARGS: "--master spark://spark-master:7077 --conf spark.eventLog.enabled=true --conf spark.eventLog.dir=/tmp/spark-events --conf spark.ui.port=4040 pyspark-shell"
+      SPARK_EVENTLOG_ENABLED: "true"
+      SPARK_EVENTLOG_DIR: "/tmp/spark-events"
+    depends_on:
+      - spark-master
+      - postgres
+    networks:
+      - devnet
+
+networks:
+  devnet:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+  grafana_data:
