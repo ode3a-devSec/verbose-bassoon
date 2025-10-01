@@ -139,31 +139,30 @@ services:
   # -------------------------
   airflow:
     image: apache/airflow:2.8.1
-    user: "1000:1000"
     container_name: airflow
     depends_on:
       - postgres
       - kafka
       - minio
+    user: "${AIRFLOW_UID}:0" # 👈 Use host UID (1000), GID=0 (required)
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airline
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
-
     ports:
-      - "8089:8080"
+      - "8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
     command: >
       bash -c "
-        airflow db migrate &&
-        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
-        airflow scheduler & 
-        airflow webserver
-      "
+          airflow db init &&
+          airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+          exec airflow webserver
+        "
+
     networks:
       - devnet
 
@@ -215,7 +214,7 @@ services:
       - SPARK_JMX_EXPORTER_CONFIG=/opt/spark/jmx_prometheus_config.yaml
     ports:
       - "7077:7077" # Spark RPC
-      - "8080:8080" # Spark Master UI
+      - "8089:8080" # Spark Master UI
       - "7073:7073" # JMX port
       - "8090:8090" # Prometheus metrics port
     volumes:
@@ -249,8 +248,10 @@ services:
       replicas: 2
   # Jupyter Notebook
   jupyter:
-    image: jupyter_impr-jupyter:latest
-    container_name: jupyter-airline
+    # image: jupyter_impr-jupyter:latest
+    image: jupyter-mlops:latest
+    # container_name: jupyter-airline
+    container_name: jupyter-mlops
     ports:
       - "8890:8888" # Jupyter Lab
       - "4040:4040" # Spark Application UI (dedicated port)
@@ -262,13 +263,9 @@ services:
       - ./spark-events:/tmp/spark-events
     environment:
       JUPYTER_ENABLE_LAB: "yes"
-      JUPYTER_TOKEN: "" # Disable token for easier VS Code connection
-      JUPYTER_PASSWORD: "" # Disable password
       SPARK_MASTER: spark://spark-master:7077
       PYSPARK_PYTHON: python3
       PYSPARK_DRIVER_PYTHON: jupyter
-      PYSPARK_DRIVER_PYTHON_OPTS: "lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''"
-
       SPARK_CLASSPATH: "/opt/spark/jars/*"
       PYSPARK_SUBMIT_ARGS: "--master spark://spark-master:7077 --conf spark.eventLog.enabled=true --conf spark.eventLog.dir=/tmp/spark-events --conf spark.ui.port=4040 pyspark-shell"
       SPARK_EVENTLOG_ENABLED: "true"
@@ -276,8 +273,28 @@ services:
     depends_on:
       - spark-master
       - postgres
+    command: >
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
     networks:
       - devnet
+    # environment:
+    #   JUPYTER_ENABLE_LAB: "yes"
+    #   JUPYTER_TOKEN: "" # Disable token for easier VS Code connection
+    #   JUPYTER_PASSWORD: "" # Disable password
+    #   SPARK_MASTER: spark://spark-master:7077
+    #   PYSPARK_PYTHON: python3
+    #   PYSPARK_DRIVER_PYTHON: jupyter
+    #   PYSPARK_DRIVER_PYTHON_OPTS: "lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''"
+
+    #   SPARK_CLASSPATH: "/opt/spark/jars/*"
+    #   PYSPARK_SUBMIT_ARGS: "--master spark://spark-master:7077 --conf spark.eventLog.enabled=true --conf spark.eventLog.dir=/tmp/spark-events --conf spark.ui.port=4040 pyspark-shell"
+    #   SPARK_EVENTLOG_ENABLED: "true"
+    #   SPARK_EVENTLOG_DIR: "/tmp/spark-events"
+    # depends_on:
+    #   - spark-master
+    #   - postgres
+    # networks:
+    #   - devnet
 
 networks:
   devnet:
